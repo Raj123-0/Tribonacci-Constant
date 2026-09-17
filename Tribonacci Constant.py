@@ -3,55 +3,22 @@
 Tribonacci Constant Calculator (HPC OEIS Edition)
 ======================================================
 Calculates Tribonacci Constant to exactly [N] significant digits 
-using 12-core parallel chunking, 
-C-accelerated gmpy2 math, and strict OEIS truncation formatting.
+using an extremely efficient Newton-Raphson iteration with gmpy2.
 """
 
 import sys
-import math
 import time
 import argparse
-import multiprocessing as mp
-import gc
 import os
 
 os.environ['MPMATH_GMPY2'] = '1'
 import gmpy2
 import mpmath
-from gmpy2 import mpz
 
 sys.set_int_max_str_digits(0)
 
-NUM_WORKERS = 12
-
-def bs_series_range(a, b, n_squared):
-    """Binary splitting over series interval [a, b)."""
-    if b - a == 1:
-        k = a
-        if k == 0:
-            P = mpz(1)
-            Q = mpz(1)
-            R = mpz(1)
-        else:
-            P = mpz(n_squared)
-            Q = mpz(k)**2
-            R = mpz(1)
-        return P, Q, R
-
-    m = (a + b) // 2
-    P1, Q1, R1 = bs_series_range(a, m, n_squared)
-    P2, Q2, R2 = bs_series_range(m, b, n_squared)
-
-    P = P1 * P2
-    Q = Q1 * Q2
-    R = R1 * Q2 + P1 * R2
-    return P, Q, R
-
-def worker_chunk(args):
-    a, b, n_squared = args
-    return bs_series_range(a, b, n_squared)
-
-def save_oeis_files(constant_name, digits_str, target_digits):
+def save_oeis_files(constant_name: str, digits_str: str, target_digits: int) -> None:
+    """Saves the computed digits to a raw text file and an OEIS b-file."""
     clean_digits = digits_str.replace(".", "")[:target_digits]
     
     raw_filename = f"{constant_name}_{target_digits}_digits.txt"
@@ -65,59 +32,58 @@ def save_oeis_files(constant_name, digits_str, target_digits):
             f.write(f"{idx} {digit}\n")
     print(f"Saved OEIS b-file output to {b_filename}")
 
-def compute_tribonacci_constant_hpc(target_digits):
-    dps_working = target_digits + 50
-    mpmath.mp.dps = dps_working
-    ctx = mpmath.mp
+def compute_tribonacci_constant_hpc(target_digits: int) -> str:
+    """
+    Calculates the Tribonacci Constant to exactly [target_digits] significant digits
+    using an extremely efficient Newton-Raphson iteration with gmpy2.
+    """
+    if target_digits < 1:
+        raise ValueError("Number of digits must be at least 1")
 
-    # Chunking Strategy: Distribute mathematical intervals across 12 worker processes
-    n_val = int(math.ceil(dps_working * math.log(10) / 4.0)) + 5
-    n_sq = n_val * n_val
-    terms = int(n_val * 4) + 10
-
-    chunk_size = math.ceil(terms / NUM_WORKERS)
-    chunks = []
-    for i in range(NUM_WORKERS):
-        start = i * chunk_size
-        end = min(terms, (i + 1) * chunk_size)
-        if start < terms:
-            chunks.append((start, end, n_sq))
-
-    with mp.Pool(processes=NUM_WORKERS) as pool:
-        results = pool.map(worker_chunk, chunks)
-
-    # Safely aggregate the results in the main process
-    P, Q, R_int = results[0]
-    for P_next, Q_next, R_next in results[1:]:
-        P = P * P_next
-        Q = Q * Q_next
-        R_int = R_int * Q_next + P * R_next
-
-    del results
-    gc.collect()
-
-    # Exact evaluation using mpmath to target precision
-    val = (ctx.mpf('1') + (ctx.mpf('19') - ctx.mpf('3')*ctx.sqrt(33))**(ctx.mpf('1')/3) + (ctx.mpf('19') + ctx.mpf('3')*ctx.sqrt(33))**(ctx.mpf('1')/3)) / 3
-    val_str = ctx.nstr(val, dps_working)
-    
-    clean_digits = val_str.replace(".", "")[:target_digits]
-
-    del val
-    gc.collect()
+    try: 
+        # Newton-Raphson using gmpy2 (extremely fast)
+        # Precision in bits: (target_digits + 50) * log2(10)
+        prec_bits = int((target_digits + 50) * 3.3219280948873626) + 100
+        
+        curr_prec = 53
+        gmpy2.get_context().precision = curr_prec
+        x = gmpy2.mpfr("1.8392867552141612")
+        
+        while curr_prec < prec_bits:
+            curr_prec = min(curr_prec * 2, prec_bits)
+            gmpy2.get_context().precision = curr_prec
+            # Newton step for x^3 - x^2 - x - 1 = 0
+            x2 = x * x
+            f = x2 * x - x2 - x - 1
+            df = 3 * x2 - 2 * x - 1
+            x = x - f / df
+            
+        # Format to target_digits + 10 decimal places to be safe
+        s = format(x, f".{target_digits + 10}f")
+        clean_digits = s.replace(".", "")[:target_digits]
+    except (ImportError, AttributeError, NameError):
+        # Fallback to mpmath if gmpy2 is not fully functional
+        dps_working = target_digits + 50
+        mpmath.mp.dps = dps_working
+        ctx = mpmath.mp
+        # Analytical formula
+        val = (ctx.mpf('1') + (ctx.mpf('19') - ctx.mpf('3')*ctx.sqrt(33))**(ctx.mpf('1')/3) + (ctx.mpf('19') + ctx.mpf('3')*ctx.sqrt(33))**(ctx.mpf('1')/3)) / 3
+        val_str = ctx.nstr(val, dps_working)
+        clean_digits = val_str.replace(".", "")[:target_digits]
 
     save_oeis_files("Tribonacci_Constant", clean_digits, target_digits)
     return clean_digits
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="HPC Tribonacci Constant OEIS Calculator")
     parser.add_argument("-n", "--digits", type=int, default=1000, help="Target digits (default: 1000)")
     args = parser.parse_args()
 
     t0 = time.time()
-    digits = compute_tribonacci_constant_hpc(args.digits)
+    _ = compute_tribonacci_constant_hpc(args.digits)
     t1 = time.time()
 
-    print(f"Execution finished in {t1 - t0:.4f} seconds using {NUM_WORKERS} cores.")
+    print(f"Execution finished in {t1 - t0:.4f} seconds.")
 
 if __name__ == "__main__":
     main()
